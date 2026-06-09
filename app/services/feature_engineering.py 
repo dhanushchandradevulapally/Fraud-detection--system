@@ -1,0 +1,66 @@
+"""Feature engineering for fraud detection."""
+import numpy as np
+import pandas as pd
+from typing import Dict, List
+from datetime import datetime
+from app.models.schemas import Transaction
+
+
+class FeatureEngineer:
+    def __init__(self):
+        self.user_history: Dict[str, List[dict]] = {}
+
+    def extract_features(self, transaction: Transaction) -> dict:
+        features = {
+            "amount": transaction.amount,
+            "amount_log": np.log1p(transaction.amount),
+            "hour": transaction.timestamp.hour,
+            "day_of_week": transaction.timestamp.weekday(),
+            "is_weekend": int(transaction.timestamp.weekday() >= 5),
+            "is_night": int(transaction.timestamp.hour < 6 or transaction.timestamp.hour > 22),
+            "is_online": int(not transaction.card_present),
+            "type_purchase": int(transaction.transaction_type == "purchase"),
+            "type_transfer": int(transaction.transaction_type == "transfer"),
+            "type_withdrawal": int(transaction.transaction_type == "withdrawal"),
+            "latitude": transaction.latitude,
+            "longitude": transaction.longitude,
+        }
+        user_features = self._get_user_features(transaction.user_id, transaction)
+        features.update(user_features)
+        return features
+
+    def _get_user_features(self, user_id: str, current_txn: Transaction) -> dict:
+        history = self.user_history.get(user_id, [])
+        if not history:
+            self.user_history[user_id] = []
+            return {
+                "user_txn_count": 0,
+                "user_avg_amount": 0,
+                "user_max_amount": 0,
+                "user_amount_std": 0,
+                "time_since_last_txn": 999999,
+                "velocity_1h": 0,
+                "velocity_24h": 0,
+            }
+        amounts = [h["amount"] for h in history]
+        timestamps = [h["timestamp"] for h in history]
+        time_diffs = [(current_txn.timestamp - ts).total_seconds() / 3600 for ts in timestamps]
+        features = {
+            "user_txn_count": len(history),
+            "user_avg_amount": np.mean(amounts),
+            "user_max_amount": np.max(amounts),
+            "user_amount_std": np.std(amounts) if len(amounts) > 1 else 0,
+            "time_since_last_txn": min(time_diffs) if time_diffs else 999999,
+            "velocity_1h": sum(1 for t in time_diffs if t <= 1),
+            "velocity_24h": sum(1 for t in time_diffs if t <= 24),
+        }
+        self.user_history[user_id].append({
+            "amount": current_txn.amount,
+            "timestamp": current_txn.timestamp,
+            "merchant_id": current_txn.merchant_id
+        })
+        self.user_history[user_id] = self.user_history[user_id][-100:]
+        return features
+
+    def to_model_input(self, features: dict) -> np.ndarray:
+        return np.array(list(features.values())).reshape(1, -1)
