@@ -1,0 +1,27 @@
+"""Application configuration with environment variables."""
+from pydantic_settings import BaseSettings
+from functools import lru_cache
+
+
+class Settings(BaseSettings):
+    APP_NAME: str = "Fraud Detection API"
+    APP_VERSION: str = "1.0.0"
+    DEBUG: bool = False
+    REDIS_URL: str = "redis://localhost:6379"
+    REDIS_TTL: int = 3600
+    KAFKA_BROKER: str = "localhost:9092"
+    KAFKA_TOPIC_TRANSACTIONS: str = "transactions"
+    KAFKA_TOPIC_FRAUD_ALERTS: str = "fraud-alerts"
+    DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/fraud_db"
+    MODEL_PATH: str = "ml_models/fraud_model.pkl"
+    MODEL_THRESHOLD: float = 0.7
+    METRICS_PORT: int = 9090
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    return Settings()
