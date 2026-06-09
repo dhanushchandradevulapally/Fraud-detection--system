@@ -1,0 +1,89 @@
+"""ML model service for fraud prediction."""
+import joblib
+import numpy as np
+import time
+from typing import Optional
+from pathlib import Path
+from app.core.config import get_settings
+from app.core.logging import get_logger
+from app.models.schemas import Transaction, FraudPrediction
+from app.services.feature_engineering import FeatureEngineer
+
+logger = get_logger(__name__)
+settings = get_settings()
+
+
+class FraudModelService:
+    def __init__(self):
+        self.model = None
+        self.feature_engineer = FeatureEngineer()
+        self.model_version = "1.0.0"
+        self._load_model()
+
+    def _load_model(self):
+        model_path = Path(settings.MODEL_PATH)
+        if model_path.exists():
+            self.model = joblib.load(model_path)
+            logger.info("model_loaded", path=str(model_path))
+        else:
+            logger.warning("model_not_found", path=str(model_path))
+            self._create_dummy_model()
+
+    def _create_dummy_model(self):
+        from sklearn.ensemble import RandomForestClassifier
+        self.model = RandomForestClassifier(n_estimators=10, random_state=42)
+        X_dummy = np.random.randn(100, 18)
+        y_dummy = np.random.randint(0, 2, 100)
+        self.model.fit(X_dummy, y_dummy)
+        logger.info("dummy_model_created")
+
+    def predict(self, transaction: Transaction) -> FraudPrediction:
+        start_time = time.time()
+        features = self.feature_engineer.extract_features(transaction)
+        X = self.feature_engineer.to_model_input(features)
+        fraud_prob = float(self.model.predict_proba(X)[0][1])
+        is_fraud = fraud_prob >= settings.MODEL_THRESHOLD
+        risk_level = self._get_risk_level(fraud_prob)
+        explanation = self._generate_explanation(features, fraud_prob)
+        prediction_time = (time.time() - start_time) * 1000
+
+        return FraudPrediction(
+            transaction_id=transaction.transaction_id,
+            is_fraud=is_fraud,
+            fraud_probability=fraud_prob,
+            risk_level=risk_level,
+            model_version=self.model_version,
+            prediction_time_ms=prediction_time,
+            features_used=features,
+            explanation=explanation
+        )
+
+    def _get_risk_level(self, probability: float) -> str:
+        if probability >= 0.9:
+            return "critical"
+        elif probability >= 0.7:
+            return "high"
+        elif probability >= 0.4:
+            return "medium"
+        return "low"
+
+    def _generate_explanation(self, features: dict, probability: float) -> dict:
+        top_factors = []
+        if features.get("amount", 0) > 1000:
+            top_factors.append(f"High amount: ${features['amount']:.2f}")
+        if features.get("is_online", 0) == 1:
+            top_factors.append("Online transaction (card not present)")
+        if features.get("velocity_1h", 0) > 3:
+            top_factors.append(f"High velocity: {features['velocity_1h']} txns/hour")
+        if features.get("time_since_last_txn", 999) < 0.1:
+            top_factors.append("Very recent previous transaction")
+        if features.get("is_night", 0) == 1:
+            top_factors.append("Transaction during night hours")
+        return {
+            "top_risk_factors": top_factors[:5],
+            "probability": probability,
+            "threshold": settings.MODEL_THRESHOLD
+        }
+
+
+model_service = FraudModelService()
