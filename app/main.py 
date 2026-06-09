@@ -1,0 +1,119 @@
+"""FastAPI application for Fraud Detection API."""
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+from datetime import datetime
+import uuid
+
+from app.core.config import get_settings
+from app.core.logging import configure_logging, get_logger
+from app.core.cache import cache_manager
+from app.models.schemas import Transaction, FraudPrediction, FraudAlert, HealthCheck
+from app.services.model_service import model_service
+
+configure_logging()
+logger = get_logger(__name__)
+settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await cache_manager.connect()
+    logger.info("application_startup", version=settings.APP_VERSION)
+    yield
+    await cache_manager.disconnect()
+    logger.info("application_shutdown")
+
+
+app = FastAPI(
+    title="Real-Time Fraud Detection API",
+    description="Enterprise-grade fraud detection with ML, streaming, and real-time analytics",
+    version=settings.APP_VERSION,
+    lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/", tags=["Health"])
+async def root():
+    return {"message": "Fraud Detection API", "version": settings.APP_VERSION}
+
+
+@app.get("/health", response_model=HealthCheck, tags=["Health"])
+async def health_check():
+    return HealthCheck(
+        status="healthy",
+        version=settings.APP_VERSION,
+        timestamp=datetime.utcnow(),
+        services={
+            "redis": "connected" if cache_manager._redis else "disconnected",
+            "model": "loaded" if model_service.model else "not_loaded"
+        }
+    )
+
+
+@app.post("/predict", response_model=FraudPrediction, tags=["Prediction"])
+async def predict_fraud(transaction: Transaction, background_tasks: BackgroundTasks):
+    try:
+        cache_key = f"pred:{transaction.transaction_id}"
+        cached = await cache_manager.get(cache_key)
+        if cached:
+            logger.info("cache_hit", transaction_id=transaction.transaction_id)
+            return FraudPrediction(**cached)
+
+        prediction = model_service.predict(transaction)
+        await cache_manager.set(cache_key, prediction.model_dump())
+        await cache_manager.increment_counter("total_predictions")
+        if prediction.is_fraud:
+            await cache_manager.increment_counter("fraud_detected")
+
+        logger.info(
+            "prediction_made",
+            transaction_id=transaction.transaction_id,
+            is_fraud=prediction.is_fraud,
+            probability=prediction.fraud_probability,
+            risk_level=prediction.risk_level
+        )
+        return prediction
+
+    except Exception as e:
+        logger.error("prediction_error", error=str(e), transaction_id=transaction.transaction_id)
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+
+
+@app.post("/predict/batch", tags=["Prediction"])
+async def predict_batch(transactions: list[Transaction]):
+    results = []
+    for txn in transactions:
+        prediction = model_service.predict(txn)
+        results.append(prediction)
+    return {"predictions": results, "count": len(results)}
+
+
+@app.get("/metrics", tags=["Monitoring"])
+async def get_metrics():
+    total = await cache_manager.get("total_predictions") or 0
+    frauds = await cache_manager.get("fraud_detected") or 0
+    return {
+        "total_predictions": int(total),
+        "fraud_detected": int(frauds),
+        "fraud_rate": round(int(frauds) / max(int(total), 1) * 100, 2),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+@app.get("/alerts", tags=["Alerts"])
+async def get_alerts(limit: int = 50):
+    return {"alerts": [], "count": 0, "message": "Connect to database for real alerts"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
